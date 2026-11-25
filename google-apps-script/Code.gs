@@ -17,7 +17,9 @@
  * 5. (Optional) Run "testSyncLatestRow" from the dropdown to test with existing data.
  */
 
-var WEBHOOK_URL = "https://walktheplan.in/api/crm/leads/meta-webhook";
+var WEBHOOK_URL = "https://sales-crm-jhe6.onrender.com/api/crm/leads/meta-webhook";
+// Optional: if WEBHOOK_SECRET is enabled on backend, set the exact same value here
+var WEBHOOK_SECRET = "";
 
 // Non-client words to exclude from being treated as human client names
 var NON_CLIENT_TERMS = [
@@ -163,6 +165,9 @@ function syncRowToCRM(sheet, rowIdx) {
   var finalName = rawName || (rawPhone ? "Lead (" + rawPhone + ")" : (rawEmail ? "Lead (" + rawEmail.split("@")[0] + ")" : "Meta Customer"));
   var finalPlatform = (rawPlatform && rawPlatform.toLowerCase().indexOf("fb") !== -1) ? "fb" : "ig";
 
+  var parsedDate = rawCreatedAt ? new Date(rawCreatedAt) : new Date();
+  var createdAtIso = !isNaN(parsedDate.getTime()) ? parsedDate.toISOString() : new Date().toISOString();
+
   // Build Payload
   var payload = {
     full_name: finalName,
@@ -170,19 +175,26 @@ function syncRowToCRM(sheet, rowIdx) {
     email: rawEmail || null,
     city: rawCity || null,
     platform: finalPlatform,
+    lead_category: "meta",
     "what_is_your_floor_plan_status_?": rawFloorPlan || null,
     "what_is_your_plot_size_?": rawPlotSize || null,
     ad_name: rawAdName || "Meta Ad Campaign",
     campaign_name: rawCampaign || "Walk The Plan 1:1",
     status: "Pending",
-    created_at: rawCreatedAt ? new Date(rawCreatedAt).toISOString() : new Date().toISOString()
+    created_at: createdAtIso
   };
 
   Logger.log("Sending payload for Row " + rowIdx + ": " + JSON.stringify(payload));
 
+  var reqHeaders = {};
+  if (typeof WEBHOOK_SECRET !== "undefined" && WEBHOOK_SECRET) {
+    reqHeaders["x-webhook-secret"] = WEBHOOK_SECRET;
+  }
+
   var options = {
     method: "post",
     contentType: "application/json",
+    headers: reqHeaders,
     payload: JSON.stringify(payload),
     muteHttpExceptions: true
   };

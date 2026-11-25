@@ -16,6 +16,9 @@ services:
       # Optional: enforce x-webhook-secret on POST webhooks
       # - key: WEBHOOK_SECRET
       #   generateValue: true
+      # Optional: Meta Page Access Token for direct Meta Graph leadgen webhooks
+      # - key: META_PAGE_ACCESS_TOKEN
+      #   sync: false
       # If using a Render Persistent Disk (paid Starter+ plan), uncomment both blocks below:
       # - key: DATA_DIR
       #   value: /var/data

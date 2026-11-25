@@ -976,6 +976,48 @@ const handleWebhookChallenge = (req, res, title) => {
 router.get('/api/crm/leads/meta-webhook', (req, res) => handleWebhookChallenge(req, res, 'Meta Ads Webhook Endpoint'));
 router.get(['/api/crm/leads/google-webhook', '/api/crm/leads/sheets-webhook'], (req, res) => handleWebhookChallenge(req, res, 'Google Sheets Live Sync Webhook'));
 
+// Resolve native Meta Graph API leadgen webhooks (either inline field_data or leadgen_id Graph lookup)
+async function resolveMetaGraphLeadPayload(rawPayload) {
+  const entry = Array.isArray(rawPayload?.entry) ? rawPayload.entry[0] : null;
+  const change = entry && Array.isArray(entry.changes) ? entry.changes[0] : null;
+  const val = change?.value || null;
+  if (!val || (!val.leadgen_id && !Array.isArray(val.field_data))) {
+    return { payload: rawPayload, isGraphEvent: false };
+  }
+
+  let graphLead = {};
+  if (val.leadgen_id && process.env.META_PAGE_ACCESS_TOKEN) {
+    const fields = 'created_time,field_data,ad_id,ad_name,adset_name,campaign_id,campaign_name,form_id,platform';
+    const url = `https://graph.facebook.com/v21.0/${encodeURIComponent(val.leadgen_id)}?fields=${fields}&access_token=${encodeURIComponent(process.env.META_PAGE_ACCESS_TOKEN)}`;
+    const gRes = await fetch(url);
+    if (!gRes.ok) {
+      const errText = await gRes.text().catch(() => '');
+      throw new Error(`Meta Graph API lookup failed (${gRes.status}): ${errText}`);
+    }
+    graphLead = await gRes.json();
+  } else if (val.leadgen_id && !Array.isArray(val.field_data)) {
+    throw new Error('META_PAGE_ACCESS_TOKEN_MISSING');
+  }
+
+  const merged = {
+    ...rawPayload,
+    ad_id: graphLead.ad_id || val.ad_id || rawPayload.ad_id,
+    ad_name: graphLead.ad_name || val.ad_name || rawPayload.ad_name,
+    campaign_id: graphLead.campaign_id || val.campaign_id || rawPayload.campaign_id,
+    campaign_name: graphLead.campaign_name || val.campaign_name || rawPayload.campaign_name,
+    platform: graphLead.platform || val.platform || rawPayload.platform,
+    created_time: graphLead.created_time || (val.created_time ? new Date(Number(val.created_time) * 1000).toISOString() : undefined) || rawPayload.created_time,
+  };
+
+  const fieldData = Array.isArray(graphLead.field_data) ? graphLead.field_data : (Array.isArray(val.field_data) ? val.field_data : []);
+  for (const item of fieldData) {
+    if (item?.name && Array.isArray(item.values) && item.values.length > 0) {
+      merged[item.name] = item.values[0];
+    }
+  }
+  return { payload: merged, isGraphEvent: true };
+}
+
 // Ingest live leads from Meta Ads Manager / Google Sheets / Zapier / Make
 const handleIncomingLeadWebhook = async (req, res, defaultCategory = null) => {
   const db = req.crmDb;
@@ -992,7 +1034,16 @@ const handleIncomingLeadWebhook = async (req, res, defaultCategory = null) => {
       return res.status(401).json({ message: 'Unauthorized webhook secret.' });
     }
 
-    const payload = req.body || {};
+    let payload = req.body || {};
+    try {
+      const resolved = await resolveMetaGraphLeadPayload(payload);
+      payload = resolved.payload;
+    } catch (graphErr) {
+      if (graphErr.message === 'META_PAGE_ACCESS_TOKEN_MISSING') {
+        return res.status(400).json({ message: 'Meta Graph leadgen webhook received, but META_PAGE_ACCESS_TOKEN is not configured.' });
+      }
+      throw graphErr;
+    }
 
     // 1. Timestamp handling: ISO string format (new Date().toISOString())
     let created_at = new Date().toISOString();
@@ -1072,18 +1123,21 @@ const handleIncomingLeadWebhook = async (req, res, defaultCategory = null) => {
     const rawPlatform = String(payload.platform || payload.meta_platform || '').toLowerCase();
     const rawSource = String(payload.source || '').toLowerCase();
     const userAgent = String(req.headers['user-agent'] || '').toLowerCase();
+    const fromAppsScript = userAgent.includes('google-apps-script');
+    const explicitGoogleCategory = payload.lead_category === 'google_sheets' || payload.lead_category === 'sheets';
 
     const isGoogleSheet = Boolean(
       defaultCategory === 'google_sheets' ||
-      payload.lead_category === 'google_sheets' ||
-      payload.lead_category === 'sheets' ||
-      rawPlatform.includes('sheet') ||
-      rawPlatform.includes('google') ||
-      rawSource.includes('sheet') ||
-      rawSource.includes('google') ||
-      userAgent.includes('google-apps-script') ||
-      payload.sheet_name ||
-      payload.spreadsheet_id
+      explicitGoogleCategory ||
+      (defaultCategory !== 'meta' && (
+        rawPlatform.includes('sheet') ||
+        rawPlatform.includes('google') ||
+        rawSource.includes('sheet') ||
+        rawSource.includes('google') ||
+        fromAppsScript ||
+        payload.sheet_name ||
+        payload.spreadsheet_id
+      ))
     );
 
     const platform = isGoogleSheet
@@ -1091,7 +1145,13 @@ const handleIncomingLeadWebhook = async (req, res, defaultCategory = null) => {
       : ((rawPlatform.includes('fb') || rawPlatform.includes('facebook')) ? 'fb' : 'ig');
 
     const lead_category = isGoogleSheet ? 'google_sheets' : (payload.lead_category || 'meta');
-    const source = payload.source || (isGoogleSheet ? 'Google Sheet Live Sync' : `Meta Ads (${platform.toUpperCase()})`);
+    const source = payload.source || (
+      isGoogleSheet
+        ? 'Google Sheet Live Sync'
+        : ((fromAppsScript || payload.sheet_name || payload.spreadsheet_id)
+          ? `Meta Ads via Google Sheet (${platform.toUpperCase()})`
+          : `Meta Ads (${platform.toUpperCase()})`)
+    );
     const name = rawName || (phone ? `${isGoogleSheet ? 'Google Sheet' : 'Meta'} Lead (${phone})` : (email ? `${isGoogleSheet ? 'Google Sheet' : 'Meta'} Lead (${email.split('@')[0]})` : (isGoogleSheet ? 'New Google Sheet Lead' : 'New Meta Lead')));
 
     // 7. Deduplicate against existing CRM leads by normalized phone or email
@@ -1159,7 +1219,7 @@ const handleIncomingLeadWebhook = async (req, res, defaultCategory = null) => {
 };
 
 // POST /api/crm/leads/meta-webhook — Ingest live leads from Meta Ads Manager / Google Sheets
-router.post('/api/crm/leads/meta-webhook', (req, res) => handleIncomingLeadWebhook(req, res));
+router.post('/api/crm/leads/meta-webhook', (req, res) => handleIncomingLeadWebhook(req, res, 'meta'));
 router.post(['/api/crm/leads/google-webhook', '/api/crm/leads/sheets-webhook'], (req, res) => handleIncomingLeadWebhook(req, res, 'google_sheets'));
 
 // GET /api/crm/hr/stats — Human Resources Department Staff Analytics

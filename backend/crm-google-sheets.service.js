@@ -386,9 +386,18 @@ async function syncGoogleSheetToCRM(db, config, syncType = 'manual') {
     }
 
     const platform = (rawPlatform && String(rawPlatform).toLowerCase().includes('fb')) ? 'fb' : 'ig';
-    const source = 'Google Sheet Live Sync';
+    const hasMetaFields = Boolean(
+      rawFloorPlan ||
+      rawPlotSize ||
+      rawAdName ||
+      rawCampaign ||
+      (rawPlatform && /^(fb|facebook|ig|instagram|meta)$/i.test(String(rawPlatform).trim()))
+    );
+    const source = hasMetaFields
+      ? `Meta Ads via Google Sheet (${platform.toUpperCase()})`
+      : 'Google Sheet Live Sync';
     const status = normalizeSheetStatus(rawStatus);
-    const lead_category = 'google_sheets';
+    const lead_category = hasMetaFields ? 'meta' : 'google_sheets';
 
     // 4. Robust De-duplication Check against SQLite crm_leads
     let isDuplicate = false;

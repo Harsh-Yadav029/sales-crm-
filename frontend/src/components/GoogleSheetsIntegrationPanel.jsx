@@ -215,6 +215,7 @@ export default function GoogleSheetsIntegrationPanel({ addToast }) {
 // Setup: Extensions > Apps Script > Paste this code > Add Trigger: onChangeTrigger (On change)
 
 var WEBHOOK_URL = "${webhookUrl}";
+var WEBHOOK_SECRET = ""; // Optional: set if WEBHOOK_SECRET is enabled on backend
 var NON_CLIENT_TERMS = [
   "ad a", "ad b", "ad c", "ad 1", "ad 2", "ad name", "ad_name", "ad set",
   "meta ad", "meta ad campaign", "campaign", "campaign name",
@@ -267,18 +268,55 @@ function syncRowToCRM(sheet, rowIdx) {
   }
 
   var rawName = getByHeader(["fullname", "full_name", "clientname", "customername", "name"]);
-  var rawPhone = getByHeader(["phonenumber", "phone_number", "phone", "phoneno", "mobile", "contact"]);
+  var rawPhone = getByHeader(["phonenumber", "phone_number", "phone", "phoneno", "mobile", "mobilenumber", "contact", "contactnumber"]);
   var rawEmail = getByHeader(["email", "emailaddress", "email_address", "mail"]);
-  var rawCity = getByHeader(["city", "location", "town"]);
-  var rawFloorPlan = getByHeader(["whatisyourfloorplanstatus", "whatisyourfloorplanstatus?", "floorplanstatus"]);
-  var rawPlotSize = getByHeader(["whatisyourplotsize", "whatisyourplotsize?", "plotsize"]);
+  var rawCity = getByHeader(["city", "location", "town", "district"]);
+  var rawFloorPlan = getByHeader(["whatisyourfloorplanstatus", "whatisyourfloorplanstatus?", "floorplanstatus", "floor_plan_status"]);
+  var rawPlotSize = getByHeader(["whatisyourplotsize", "whatisyourplotsize?", "plotsize", "plot_size"]);
   var rawAdName = getByHeader(["adname", "ad_name", "adid"]);
   var rawCampaign = getByHeader(["campaignname", "campaign_name", "campaignid"]);
   var rawPlatform = getByHeader(["platform", "metaplatform"]);
   var rawCreatedAt = getByHeader(["createdtime", "created_time", "createdat", "timestamp", "date"]);
 
-  var finalName = rawName || (rawPhone ? "Lead (" + rawPhone + ")" : "Meta Customer");
+  // Content fallback for mismatched or unlabelled columns
+  if (!rawEmail || !rawPhone || !rawName) {
+    for (var i = 0; i < values.length; i++) {
+      var cellVal = values[i];
+      if (cellVal === null || cellVal === undefined) continue;
+      var str = String(cellVal).trim();
+      if (!str) continue;
+      if (!rawEmail && str.indexOf("@") !== -1 && /[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}/i.test(str)) {
+        rawEmail = str;
+        continue;
+      }
+      var digitsOnly = str.replace(/\\D/g, "");
+      if (!rawPhone && digitsOnly.length >= 10 && digitsOnly.length <= 15 && str.indexOf("@") === -1) {
+        rawPhone = str;
+        continue;
+      }
+      if (!rawName && isValidHumanName(str)) {
+        rawName = str;
+        continue;
+      }
+      if (!rawCity && isLikelyCity(str)) {
+        rawCity = str;
+        continue;
+      }
+    }
+  }
+
+  if (!isValidHumanName(rawName)) {
+    rawName = null;
+    for (var j = 0; j < values.length; j++) {
+      var vStr = String(values[j] || "").trim();
+      if (isValidHumanName(vStr)) { rawName = vStr; break; }
+    }
+  }
+
+  var finalName = rawName || (rawPhone ? "Lead (" + rawPhone + ")" : (rawEmail ? "Lead (" + rawEmail.split("@")[0] + ")" : "Meta Customer"));
   var finalPlatform = (rawPlatform && rawPlatform.toLowerCase().indexOf("fb") !== -1) ? "fb" : "ig";
+  var parsedDate = rawCreatedAt ? new Date(rawCreatedAt) : new Date();
+  var createdAtIso = !isNaN(parsedDate.getTime()) ? parsedDate.toISOString() : new Date().toISOString();
 
   var payload = {
     full_name: finalName,
@@ -286,20 +324,65 @@ function syncRowToCRM(sheet, rowIdx) {
     email: rawEmail || null,
     city: rawCity || null,
     platform: finalPlatform,
+    lead_category: "meta",
     "what_is_your_floor_plan_status_?": rawFloorPlan || null,
     "what_is_your_plot_size_?": rawPlotSize || null,
     ad_name: rawAdName || "Meta Ad Campaign",
     campaign_name: rawCampaign || "Walk The Plan 1:1",
     status: "Pending",
-    created_at: rawCreatedAt ? new Date(rawCreatedAt).toISOString() : new Date().toISOString()
+    created_at: createdAtIso
   };
+
+  var reqHeaders = {};
+  if (WEBHOOK_SECRET) reqHeaders["x-webhook-secret"] = WEBHOOK_SECRET;
 
   UrlFetchApp.fetch(WEBHOOK_URL, {
     method: "post",
     contentType: "application/json",
+    headers: reqHeaders,
     payload: JSON.stringify(payload),
     muteHttpExceptions: true
   });
+}
+
+function isValidHumanName(str) {
+  if (!str) return false;
+  var s = String(str).trim().toLowerCase();
+  if (s.length < 2 || s.length > 50) return false;
+  if (s.indexOf("@") !== -1 || s.indexOf("http") !== -1) return false;
+  if (/^\\+?[\\d\\s\\-()]+$/.test(s)) return false;
+  for (var i = 0; i < NON_CLIENT_TERMS.length; i++) {
+    if (s === NON_CLIENT_TERMS[i]) return false;
+  }
+  if (/^(ad|adset|campaign|form|page|id|l:|leadgen)[\\s_-]*([a-z0-9]+)?$/i.test(s)) return false;
+  if (/^(pending|ready|residential|commercial|instagram|facebook|meta)$/i.test(s)) return false;
+  return true;
+}
+
+function isLikelyCity(str) {
+  if (!str) return false;
+  var s = String(str).trim();
+  if (s.length < 3 || s.length > 30) return false;
+  if (!/^[a-zA-Z\\s.-]+$/.test(s)) return false;
+  var sLow = s.toLowerCase();
+  if (isValidHumanName(s) && !/^(gurgaon|gurugram|delhi|noida|faridabad|mumbai|bangalore|bengaluru|hyderabad|pune|kolkata|chennai|ahmedabad|jaipur|lucknow|chandigarh|dehradun|varanasi)/i.test(sLow)) {
+    return false;
+  }
+  return true;
+}
+
+function testSyncLatestRow() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var lastRow = sheet.getLastRow();
+  if (lastRow <= 1) { SpreadsheetApp.getUi().alert("No data rows found."); return; }
+  syncRowToCRM(sheet, lastRow);
+  SpreadsheetApp.getUi().alert("Synced Row " + lastRow + " to Walk The Plan CRM!");
+}
+
+function resetSyncRow() {
+  var lastRow = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet().getLastRow();
+  PropertiesService.getScriptProperties().setProperty("LAST_SYNCED_ROW", String(lastRow));
+  SpreadsheetApp.getUi().alert("Sync tracker reset to row " + lastRow + ".");
 }`;
 
   const CRM_FIELDS = [
