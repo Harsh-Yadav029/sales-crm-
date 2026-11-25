@@ -4,7 +4,7 @@
 // Universal Live Ingestion, Intelligent Column Mapping, Deduplication
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const { cleanPhoneNumber, cleanEmail, isInvalidClientName, normalizeStatus } = require('./crm-lead.parser');
+const { cleanPhoneNumber, cleanEmail, isInvalidClientName, normalizeStatus, parseDateValue, parseSubmissionTimestamp } = require('./crm-lead.parser');
 
 /**
  * Extracts standard Google Spreadsheet ID from a URL or raw ID string
@@ -19,37 +19,44 @@ function extractSpreadsheetId(input) {
 }
 
 /**
- * Parses CSV text into a 2D matrix of strings
+ * RFC-4180 compliant CSV parser (handles multi-line quoted cells and "" escapes)
  */
 function parseCsvToMatrix(csvText) {
-  const lines = csvText.split(/\r?\n/).filter(line => line.trim().length > 0);
-  if (lines.length === 0) return [];
+  if (!csvText || !String(csvText).trim()) return [];
+  const rows = [];
+  let row = [];
+  let cur = '';
+  let inQuotes = false;
 
-  function parseCsvLine(line) {
-    const result = [];
-    let cur = '';
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const char = line[i];
-      if (char === '"') {
-        if (inQuotes && line[i + 1] === '"') {
-          cur += '"';
-          i++;
-        } else {
-          inQuotes = !inQuotes;
-        }
-      } else if (char === ',' && !inQuotes) {
-        result.push(cur.trim());
-        cur = '';
+  for (let i = 0; i < csvText.length; i++) {
+    const ch = csvText[i];
+    if (ch === '"') {
+      if (inQuotes && csvText[i + 1] === '"') {
+        cur += '"';
+        i++;
       } else {
-        cur += char;
+        inQuotes = !inQuotes;
       }
+    } else if (ch === ',' && !inQuotes) {
+      row.push(cur.trim());
+      cur = '';
+    } else if ((ch === '\r' || ch === '\n') && !inQuotes) {
+      if (ch === '\r' && csvText[i + 1] === '\n') i++;
+      row.push(cur.trim());
+      if (row.some(cell => cell.length > 0)) {
+        rows.push(row);
+      }
+      row = [];
+      cur = '';
+    } else {
+      cur += ch;
     }
-    result.push(cur.trim());
-    return result;
   }
-
-  return lines.map(line => parseCsvLine(line));
+  row.push(cur.trim());
+  if (row.some(cell => cell.length > 0)) {
+    rows.push(row);
+  }
+  return rows;
 }
 
 /**
@@ -261,7 +268,8 @@ function proposeAutoMapping(headers = []) {
     campaign_name: findMatch(['campaignname', 'campaign_name', 'campaignid', 'campaign']),
     platform: findMatch(['platform', 'metaplatform', 'channel', 'source']),
     status: findMatch(['leadstatus', 'lead_status', 'status', 'stage', 'leadstage']),
-    date: findMatch(['followupdate', 'follow_up_date', 'followup', 'createdtime', 'created_time', 'createdat', 'timestamp', 'date']),
+    date: findMatch(['createdtime', 'created_time', 'createdat', 'timestamp', 'submissiondate', 'date']),
+    follow_up_date: findMatch(['followupdate', 'follow_up_date', 'followup', 'nextfollowupdate', 'nextfollowup']),
     notes: findMatch(['notes', 'remarks', 'comment', 'comments', 'details'])
   };
 }
@@ -285,7 +293,7 @@ function normalizeSheetStatus(rawStatus) {
 
 /**
  * Core Live Synchronization Engine:
- * Reads sheet rows, applies mapping, sanitizes, deduplicates, and inserts into crm_leads
+ * Reads sheet rows, applies mapping, sanitizes, deduplicates, heals legacy timestamps, and inserts into crm_leads
  */
 async function syncGoogleSheetToCRM(db, config, syncType = 'manual') {
   if (!config || !config.spreadsheet_id) {
@@ -300,11 +308,11 @@ async function syncGoogleSheetToCRM(db, config, syncType = 'manual') {
     mapping = {};
   }
 
-  const dbGet = (sql, params) => new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => err ? reject(err) : resolve(row));
+  const dbAll = (sql, params = []) => new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows));
   });
 
-  const dbRun = (sql, params) => new Promise((resolve, reject) => {
+  const dbRun = (sql, params = []) => new Promise((resolve, reject) => {
     db.run(sql, params, function (err) {
       if (err) reject(err);
       else resolve(this);
@@ -320,6 +328,7 @@ async function syncGoogleSheetToCRM(db, config, syncType = 'manual') {
       success: true,
       synced_count: 0,
       skipped_count: 0,
+      healed_count: 0,
       total_rows: 0,
       message: 'Sheet was read successfully, but no client rows were found.'
     };
@@ -332,10 +341,38 @@ async function syncGoogleSheetToCRM(db, config, syncType = 'manual') {
     if (v) activeMap[k] = v;
   }
 
+  const dateColName = String(activeMap.date || '').toLowerCase();
+  const isDateColFollowUp = dateColName.includes('follow') || dateColName.includes('reminder') || dateColName.includes('nextcall');
+
+  const toPhoneKey = (p) => {
+    if (!p) return '';
+    const digits = String(p).replace(/\D/g, '');
+    if (digits.length >= 10) return digits.slice(-10);
+    return digits.length >= 7 ? digits : '';
+  };
+
+  // Preload existing leads into memory for fast, transactional deduplication & timestamp healing
+  const existingRows = await dbAll(
+    'SELECT id, name, phone, email, created_at, follow_up_date, follow_up_time, follow_up_status, follow_up_notes FROM crm_leads'
+  );
+  const phoneToLead = new Map();
+  const emailToLead = new Map();
+  for (const er of (existingRows || [])) {
+    const pk = toPhoneKey(er.phone);
+    if (pk && !phoneToLead.has(pk)) phoneToLead.set(pk, er);
+    const ek = er.email ? String(er.email).trim().toLowerCase() : '';
+    if (ek && !emailToLead.has(ek)) emailToLead.set(ek, er);
+  }
+
   let synced_count = 0;
   let skipped_count = 0;
+  let healed_count = 0;
   const newLeadRecords = [];
 
+  await dbRun('BEGIN TRANSACTION');
+  let txOpen = true;
+
+  try {
   // 3. Process every lead row
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -352,6 +389,13 @@ async function syncGoogleSheetToCRM(db, config, syncType = 'manual') {
     const rawStatus = activeMap.status && row[activeMap.status] ? String(row[activeMap.status]).trim() : null;
     const rawNotes = activeMap.notes && row[activeMap.notes] ? String(row[activeMap.notes]).trim() : null;
     const rawDate = activeMap.date && row[activeMap.date] ? String(row[activeMap.date]).trim() : null;
+    const rawFollowUp = activeMap.follow_up_date && row[activeMap.follow_up_date] ? String(row[activeMap.follow_up_date]).trim() : null;
+
+    // Skip Meta placeholder test lead rows
+    if ((rawName && /^<test lead:/i.test(rawName)) || (rawEmail && rawEmail.toLowerCase() === 'test@meta.com')) {
+      skipped_count++;
+      continue;
+    }
 
     // Normalization & Sanitization
     const cleanedPhone = rawPhone ? cleanPhoneNumber(rawPhone) : null;
@@ -367,23 +411,18 @@ async function syncGoogleSheetToCRM(db, config, syncType = 'manual') {
     if (isInvalidClientName(finalName)) {
       finalName = cleanedPhone ? `Lead (${cleanedPhone})` : (cleanedEmail ? `Lead (${cleanedEmail.split('@')[0]})` : null);
     }
-    // If still invalid or empty, skip
     if (!finalName && !cleanedPhone && !cleanedEmail) {
       skipped_count++;
       continue;
     }
     if (!finalName) finalName = 'Valued Client';
 
-    let created_at = new Date().toISOString();
-    let follow_up_date = null;
-    if (rawDate) {
-      const parsed = new Date(rawDate);
-      if (!isNaN(parsed.getTime())) {
-        follow_up_date = parsed.toISOString().split('T')[0];
-      } else if (/^\d{4}-\d{2}-\d{2}/.test(rawDate)) {
-        follow_up_date = rawDate.split(' ')[0];
-      }
-    }
+    // Submission timestamp -> created_at; explicit follow-up column -> follow_up_date
+    const parsedCreatedAt = (!isDateColFollowUp && rawDate) ? parseSubmissionTimestamp(rawDate) : null;
+    const created_at = parsedCreatedAt || new Date().toISOString();
+
+    const followUpRawVal = rawFollowUp || (isDateColFollowUp ? rawDate : null);
+    const follow_up_date = followUpRawVal ? parseDateValue(followUpRawVal) : null;
 
     const platform = (rawPlatform && String(rawPlatform).toLowerCase().includes('fb')) ? 'fb' : 'ig';
     const hasMetaFields = Boolean(
@@ -399,24 +438,31 @@ async function syncGoogleSheetToCRM(db, config, syncType = 'manual') {
     const status = normalizeSheetStatus(rawStatus);
     const lead_category = hasMetaFields ? 'meta' : 'google_sheets';
 
-    // 4. Robust De-duplication Check against SQLite crm_leads
-    let isDuplicate = false;
-    if (cleanedPhone) {
-      const phoneDigits = cleanedPhone.replace(/\D/g, '').slice(-10);
-      if (phoneDigits.length >= 7) {
-        const existing = await dbGet(
-          "SELECT id, name FROM crm_leads WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, '+', ''), ' ', ''), '-', ''), '(', ''), ')', '') LIKE ?",
-          [`%${phoneDigits}`]
-        );
-        if (existing) isDuplicate = true;
-      }
-    }
-    if (!isDuplicate && cleanedEmail) {
-      const existing = await dbGet('SELECT id, name FROM crm_leads WHERE LOWER(email) = LOWER(?)', [cleanedEmail]);
-      if (existing) isDuplicate = true;
-    }
+    // 4. De-duplication + auto-healing of legacy leads whose created_time was placed in follow_up_date
+    const phoneKey = toPhoneKey(cleanedPhone);
+    const emailKey = cleanedEmail ? cleanedEmail.toLowerCase() : '';
+    const existingLead = (phoneKey && phoneToLead.get(phoneKey)) || (emailKey && emailToLead.get(emailKey)) || null;
 
-    if (isDuplicate) {
+    if (existingLead) {
+      if (!isDateColFollowUp && rawDate && parsedCreatedAt && !rawFollowUp &&
+          !existingLead.follow_up_time && !existingLead.follow_up_notes && existingLead.follow_up_status !== 'completed') {
+        // Check legacy parseDateValue output first (e.g. '2026-10-27' for '2026-10-27T21:41:07-05:00'), plus UTC/IST calendar variants
+        const legacyParsedDate = parseDateValue(rawDate);
+        const legacyDt = new Date(parsedCreatedAt);
+        const legacyUtcDate = !isNaN(legacyDt.getTime()) ? legacyDt.toISOString().split('T')[0] : null;
+        const legacyIstDate = !isNaN(legacyDt.getTime())
+          ? new Date(legacyDt.getTime() + 5.5 * 3600 * 1000).toISOString().split('T')[0]
+          : null;
+        if (existingLead.follow_up_date &&
+            (existingLead.follow_up_date === legacyParsedDate ||
+             existingLead.follow_up_date === legacyUtcDate ||
+             existingLead.follow_up_date === legacyIstDate)) {
+          await dbRun('UPDATE crm_leads SET created_at = ?, follow_up_date = NULL WHERE id = ?', [parsedCreatedAt, existingLead.id]);
+          existingLead.follow_up_date = null;
+          existingLead.created_at = parsedCreatedAt;
+          healed_count++;
+        }
+      }
       skipped_count++;
       continue;
     }
@@ -435,8 +481,11 @@ async function syncGoogleSheetToCRM(db, config, syncType = 'manual') {
       ]
     );
 
-    // Record activity audit trail
     if (insertRes.lastID) {
+      const insertedStub = { id: insertRes.lastID, follow_up_date, follow_up_time: null, follow_up_status: 'pending', follow_up_notes: null, created_at };
+      if (phoneKey) phoneToLead.set(phoneKey, insertedStub);
+      if (emailKey) emailToLead.set(emailKey, insertedStub);
+
       await dbRun(
         `INSERT INTO crm_lead_activities (lead_id, action, note, interaction_type, author_name, author_role)
          VALUES (?, ?, ?, ?, ?, ?)`,
@@ -453,6 +502,13 @@ async function syncGoogleSheetToCRM(db, config, syncType = 'manual') {
 
     synced_count++;
     newLeadRecords.push({ id: insertRes.lastID, name: finalName, phone: cleanedPhone, city: rawCity });
+  }
+
+  await dbRun('COMMIT');
+  txOpen = false;
+  } catch (loopErr) {
+    if (txOpen) { try { await dbRun('ROLLBACK'); } catch (_) {} }
+    throw loopErr;
   }
 
   // 6. Update configuration telemetry & logs
@@ -478,10 +534,13 @@ async function syncGoogleSheetToCRM(db, config, syncType = 'manual') {
     success: true,
     synced_count,
     skipped_count,
+    healed_count,
     total_rows: rows.length,
     sourceMethod,
     newLeads: newLeadRecords,
-    message: `Sync completed successfully: ${synced_count} new leads added, ${skipped_count} skipped/duplicates.`
+    message: healed_count > 0
+      ? `Sync completed: ${synced_count} new leads added, ${healed_count} lead timestamps repaired, ${skipped_count} skipped/duplicates.`
+      : `Sync completed successfully: ${synced_count} new leads added, ${skipped_count} skipped/duplicates.`
   };
   } catch (syncErr) {
     try {

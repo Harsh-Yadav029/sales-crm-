@@ -709,13 +709,13 @@ router.get('/api/crm/leads', crmAuth, async (req, res) => {
       }
     }
 
-    // Date range filter
+    // Date range filter (normalized to IST +05:30 calendar date)
     if (start_date) {
-      conditions.push('date(created_at) >= date(?)');
+      conditions.push("date(datetime(created_at, '+5 hours', '+30 minutes')) >= date(?)");
       params.push(start_date);
     }
     if (end_date) {
-      conditions.push('date(created_at) <= date(?)');
+      conditions.push("date(datetime(created_at, '+5 hours', '+30 minutes')) <= date(?)");
       params.push(end_date);
     }
 
@@ -754,7 +754,7 @@ router.get('/api/crm/leads', crmAuth, async (req, res) => {
 
     const leads = await dbAll(
       db,
-      `SELECT * FROM crm_leads ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      `SELECT * FROM crm_leads ${where} ORDER BY datetime(created_at) DESC, id DESC LIMIT ? OFFSET ?`,
       [...params, limit, offset]
     );
     res.json({ leads, total, pages, page, limit });
@@ -2030,11 +2030,11 @@ router.get('/api/crm/stats', crmAuth, async (req, res) => {
       }
     }
     if (start_date) {
-      conditions.push('date(created_at) >= date(?)');
+      conditions.push("date(datetime(created_at, '+5 hours', '+30 minutes')) >= date(?)");
       params.push(start_date);
     }
     if (end_date) {
-      conditions.push('date(created_at) <= date(?)');
+      conditions.push("date(datetime(created_at, '+5 hours', '+30 minutes')) <= date(?)");
       params.push(end_date);
     }
 

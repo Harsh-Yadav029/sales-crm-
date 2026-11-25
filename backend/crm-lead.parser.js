@@ -154,6 +154,9 @@ const FIELD_ALIASES = {
   ],
   razorpay_id: [
     'razorpaypaymentid', 'razorpayid'
+  ],
+  created_at: [
+    'createdtime', 'created_time', 'createdat', 'timestamp', 'submissiondate'
   ]
 };
 
@@ -323,6 +326,117 @@ function parseDateValue(val) {
           return d.toISOString().split('T')[0];
         }
       } catch { }
+    }
+  }
+
+  return null;
+}
+
+// Parse submission timestamp preserving exact UTC instant (treating naive dates/times as IST +05:30)
+function parseSubmissionTimestamp(val) {
+  if (val === undefined || val === null || val === '') return null;
+
+  const IST_OFFSET_MS = 5.5 * 3600 * 1000;
+
+  if (val instanceof Date) {
+    if (isNaN(val.getTime())) return null;
+    const yr = val.getUTCFullYear();
+    return (yr >= 2000 && yr <= 2100) ? val.toISOString() : null;
+  }
+
+  // Excel serial date numbers represent naive local (IST) wall-clock time
+  if (typeof val === 'number' || /^\d+(\.\d+)?$/.test(String(val).trim())) {
+    const num = Number(val);
+    if (num >= 36526 && num <= 73050) {
+      const utcMs = Math.round((num - 25569) * 86400 * 1000) - IST_OFFSET_MS;
+      const d = new Date(utcMs);
+      if (!isNaN(d.getTime())) return d.toISOString();
+    }
+  }
+
+  const s = String(val).trim();
+  if (!s) return null;
+
+  // Strings carrying an explicit offset or Z (e.g. 2026-10-27T21:41:07-05:00)
+  if (/(Z|[+-]\d{2}:?\d{2})$/i.test(s)) {
+    let isoCandidate = s.replace(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})/, '$1T$2');
+    isoCandidate = isoCandidate.replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
+    const parsed = Date.parse(isoCandidate);
+    if (!isNaN(parsed)) {
+      const d = new Date(parsed);
+      const yr = d.getUTCFullYear();
+      if (yr >= 2000 && yr <= 2100) return d.toISOString();
+    }
+  }
+
+  const buildIstIso = (year, month, day, timeStr) => {
+    if (year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) return null;
+    const calCheck = new Date(Date.UTC(year, month - 1, day));
+    if (calCheck.getUTCFullYear() !== year || calCheck.getUTCMonth() !== month - 1 || calCheck.getUTCDate() !== day) {
+      return null;
+    }
+
+    let hour = 9;
+    let minute = 0;
+    let second = 0;
+
+    if (timeStr && timeStr.trim()) {
+      const tMatch = timeStr.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?\s*(am|pm)?$/i);
+      if (!tMatch) return null;
+      hour = parseInt(tMatch[1], 10);
+      minute = parseInt(tMatch[2], 10);
+      second = tMatch[3] ? parseInt(tMatch[3], 10) : 0;
+      const mer = tMatch[4] ? tMatch[4].toLowerCase() : null;
+      if (mer) {
+        if (hour < 1 || hour > 12) return null;
+        if (mer === 'pm' && hour < 12) hour += 12;
+        if (mer === 'am' && hour === 12) hour = 0;
+      }
+      if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+        return null;
+      }
+    }
+
+    const utcMs = Date.UTC(year, month - 1, day, hour, minute, second) - IST_OFFSET_MS;
+    return new Date(utcMs).toISOString();
+  };
+
+  // YYYY-MM-DD or YYYY/MM/DD with optional time
+  const isoLocalMatch = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T\s]+(.+))?$/);
+  if (isoLocalMatch) {
+    const res = buildIstIso(
+      parseInt(isoLocalMatch[1], 10),
+      parseInt(isoLocalMatch[2], 10),
+      parseInt(isoLocalMatch[3], 10),
+      isoLocalMatch[4]
+    );
+    if (res) return res;
+  }
+
+  // DD/MM/YYYY or MM/DD/YYYY with optional time
+  const dmyMatch = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?:[,\sT]+(.+))?$/);
+  if (dmyMatch) {
+    const first = parseInt(dmyMatch[1], 10);
+    const second = parseInt(dmyMatch[2], 10);
+    const year = parseInt(dmyMatch[3], 10);
+    const timePart = dmyMatch[4];
+    let day = first;
+    let month = second;
+    if (first <= 12 && second > 12) {
+      month = first;
+      day = second;
+    }
+    const res = buildIstIso(year, month, day, timePart);
+    if (res) return res;
+  }
+
+  // Fallback for textual dates (e.g. "23 Nov 2026 10:30 AM")
+  if (/[-/\s,]/.test(s) && !/^\d+$/.test(s)) {
+    const parsed = Date.parse(s);
+    if (!isNaN(parsed)) {
+      const d = new Date(parsed);
+      const yr = d.getUTCFullYear();
+      if (yr >= 2000 && yr <= 2100) return d.toISOString();
     }
   }
 
@@ -582,6 +696,7 @@ function parseLeadSpreadsheet(fileBuffer, originalFilename = '') {
     let rawPriority = getVal('priority');
     let rawNotes = getVal('notes');
     let rawFollowUp = getVal('follow_up_date');
+    let rawCreatedAt = getVal('created_at');
     let rawAssigned = getVal('assigned_to');
     let rawPlatform = getVal('meta_platform');
     let rawFloorPlan = getVal('floor_plan_status');
@@ -714,7 +829,7 @@ function parseLeadSpreadsheet(fileBuffer, originalFilename = '') {
       plot_size: rawPlotSize ? String(rawPlotSize).trim() : null,
       meta_ad_name: rawAdName ? String(rawAdName).trim() : null,
       meta_campaign_name: rawCampaignName ? String(rawCampaignName).trim() : null,
-      created_at: new Date().toISOString()
+      created_at: parseSubmissionTimestamp(rawCreatedAt) || new Date().toISOString()
     };
 
     leads.push(sanitizedLead);
@@ -885,8 +1000,8 @@ function sanitizeLeadObject(raw) {
   let created_at = new Date().toISOString();
   const rawCreated = raw.created_at || raw.created_time || raw.createdTime;
   if (rawCreated) {
-    const parsed = new Date(rawCreated);
-    if (!isNaN(parsed.getTime())) created_at = parsed.toISOString();
+    const parsedCreated = parseSubmissionTimestamp(rawCreated);
+    if (parsedCreated) created_at = parsedCreated;
   }
 
   return {
@@ -926,6 +1041,7 @@ module.exports = {
   cleanPhoneNumber,
   cleanEmail,
   parseDateValue,
+  parseSubmissionTimestamp,
   normalizeStatus,
   normalizePriority,
   isInvalidClientName,
