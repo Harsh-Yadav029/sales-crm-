@@ -16,208 +16,219 @@ const JWT_SECRET = process.env.JWT_SECRET || 'walk_the_plan_crm_secret_key_2026'
 
 // ─── DB Schema Init ───────────────────────────────────────────────────────────
 function initCrmDb(db) {
-  // CRM Leads table
-  db.run(`CREATE TABLE IF NOT EXISTS crm_leads (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT,
-      email TEXT,
-      phone TEXT,
-      source TEXT,
-      status TEXT DEFAULT 'new',
-      priority TEXT DEFAULT 'medium',
-      assigned_to TEXT,
-      notes TEXT,
-      city TEXT,
-      state TEXT,
-      budget TEXT,
-      requirement TEXT,
-      follow_up_date TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      audio_url TEXT,
-      tags TEXT,
-      lead_category TEXT DEFAULT 'meta',
-      meta_platform TEXT,
-      floor_plan_status TEXT,
-      plot_size TEXT,
-      meta_ad_name TEXT,
-      meta_campaign_name TEXT,
-      studio_location TEXT,
-      package_service TEXT,
-      payment_status TEXT,
-      token_paid REAL DEFAULT 0,
-      balance_pending REAL DEFAULT 0,
-      razorpay_id TEXT,
-      inquiry_details TEXT
-    )`, (err) => {
-      if (err) console.error('[CRM] Error creating crm_leads table:', err.message);
-      else console.log('[CRM] crm_leads table ready.');
-    });
+  return new Promise((resolve) => {
+    db.serialize(() => {
+      // SQLite concurrency hardening pragma
+      db.run('PRAGMA busy_timeout = 5000;', () => {});
 
-    // CRM Users table
-    db.run(`CREATE TABLE IF NOT EXISTS crm_users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      email TEXT UNIQUE NOT NULL,
-      phone TEXT,
-      role TEXT DEFAULT 'agent',
-      password_hash TEXT NOT NULL,
-      is_active INTEGER DEFAULT 1,
-      department TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      avatar_color TEXT
-    )`, (err) => {
-      if (err) {
-        console.error('[CRM] Error creating crm_users table:', err.message);
-      } else {
-        console.log('[CRM] crm_users table ready.');
-        // Seed default admin if none exists
-        db.get('SELECT COUNT(*) as count FROM crm_users', (countErr, row) => {
-          if (!countErr && (!row || row.count === 0)) {
-            const hash = bcrypt.hashSync('walk@321', 10);
-            db.run(
-              'INSERT INTO crm_users (name, email, role, password_hash, is_active, department) VALUES (?, ?, ?, ?, 1, ?)',
-              ['Admin', 'admin@walktheplan.in', 'admin', hash, 'Management']
-            );
-            console.log('[CRM] Seeded default administrator (admin@walktheplan.in / walk@321).');
-          } else {
-            // Ensure admin@walktheplan.in specifically exists
-            db.get('SELECT id FROM crm_users WHERE email = ?', ['admin@walktheplan.in'], (adminErr, adminRow) => {
-              if (!adminErr && !adminRow) {
-                const hash = bcrypt.hashSync('walk@321', 10);
-                db.run(
-                  'INSERT INTO crm_users (name, email, role, password_hash, is_active, department) VALUES (?, ?, ?, ?, 1, ?)',
-                  ['Admin', 'admin@walktheplan.in', 'admin', hash, 'Management']
-                );
-                console.log('[CRM] Seeded administrator (admin@walktheplan.in / walk@321).');
+      // CRM Leads table (includes all extended pipeline & follow-up columns for clean fresh installs)
+      db.run(`CREATE TABLE IF NOT EXISTS crm_leads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        email TEXT,
+        phone TEXT,
+        source TEXT,
+        status TEXT DEFAULT 'new',
+        priority TEXT DEFAULT 'medium',
+        assigned_to TEXT,
+        notes TEXT,
+        city TEXT,
+        state TEXT,
+        budget TEXT,
+        requirement TEXT,
+        follow_up_date TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        audio_url TEXT,
+        tags TEXT,
+        lead_category TEXT DEFAULT 'meta',
+        meta_platform TEXT,
+        floor_plan_status TEXT,
+        plot_size TEXT,
+        meta_ad_name TEXT,
+        meta_campaign_name TEXT,
+        studio_location TEXT,
+        package_service TEXT,
+        payment_status TEXT,
+        token_paid REAL DEFAULT 0,
+        balance_pending REAL DEFAULT 0,
+        razorpay_id TEXT,
+        inquiry_details TEXT,
+        follow_up_time TEXT,
+        follow_up_status TEXT DEFAULT 'pending',
+        follow_up_notes TEXT,
+        pipeline_stage TEXT DEFAULT 'pre_sales',
+        presales_notes TEXT,
+        presales_notes_by TEXT,
+        presales_notes_at TEXT,
+        mainsales_notes TEXT,
+        mainsales_notes_by TEXT,
+        mainsales_notes_at TEXT,
+        postsales_notes TEXT,
+        postsales_notes_by TEXT,
+        postsales_notes_at TEXT
+      )`, (err) => {
+        if (err) console.error('[CRM] Error creating crm_leads table:', err.message);
+        else console.log('[CRM] crm_leads table ready.');
+      });
+
+      // Safe migrations for pre-existing databases (serialized strictly after CREATE TABLE)
+      const leadCols = [
+        'lead_category TEXT DEFAULT "meta"',
+        'meta_platform TEXT',
+        'floor_plan_status TEXT',
+        'plot_size TEXT',
+        'meta_ad_name TEXT',
+        'meta_campaign_name TEXT',
+        'studio_location TEXT',
+        'package_service TEXT',
+        'payment_status TEXT',
+        'token_paid REAL DEFAULT 0',
+        'balance_pending REAL DEFAULT 0',
+        'razorpay_id TEXT',
+        'inquiry_details TEXT',
+        'follow_up_time TEXT',
+        'follow_up_status TEXT DEFAULT "pending"',
+        'follow_up_notes TEXT',
+        'pipeline_stage TEXT DEFAULT "pre_sales"',
+        'presales_notes TEXT',
+        'presales_notes_by TEXT',
+        'presales_notes_at TEXT',
+        'mainsales_notes TEXT',
+        'mainsales_notes_by TEXT',
+        'mainsales_notes_at TEXT',
+        'postsales_notes TEXT',
+        'postsales_notes_by TEXT',
+        'postsales_notes_at TEXT'
+      ];
+      leadCols.forEach(col => {
+        db.run(`ALTER TABLE crm_leads ADD COLUMN ${col}`, () => {});
+      });
+      db.run(`UPDATE crm_leads SET pipeline_stage = 'pre_sales' WHERE pipeline_stage IS NULL OR pipeline_stage = ''`, () => {});
+
+      // CRM Users table (includes assigned_pipeline, department, avatar_color)
+      db.run(`CREATE TABLE IF NOT EXISTS crm_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        phone TEXT,
+        role TEXT DEFAULT 'agent',
+        password_hash TEXT NOT NULL,
+        is_active INTEGER DEFAULT 1,
+        department TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        avatar_color TEXT,
+        assigned_pipeline TEXT DEFAULT 'pre_sales'
+      )`, (err) => {
+        if (err) console.error('[CRM] Error creating crm_users table:', err.message);
+        else console.log('[CRM] crm_users table ready.');
+      });
+
+      db.run('ALTER TABLE crm_users ADD COLUMN phone TEXT', () => {});
+      db.run("ALTER TABLE crm_users ADD COLUMN assigned_pipeline TEXT DEFAULT 'pre_sales'", () => {});
+      db.run('ALTER TABLE crm_users ADD COLUMN avatar_color TEXT', () => {});
+      db.run('ALTER TABLE crm_users ADD COLUMN department TEXT', () => {});
+      db.run(
+        `UPDATE crm_users SET assigned_pipeline = 'all'
+         WHERE role IN ('admin', 'manager')
+           AND (assigned_pipeline IS NULL OR assigned_pipeline = '' OR assigned_pipeline = 'pre_sales')`,
+        () => {}
+      );
+
+      // Lead activity log with append-only interaction types
+      db.run(`CREATE TABLE IF NOT EXISTS crm_lead_activities (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        lead_id INTEGER,
+        user_id INTEGER,
+        action TEXT,
+        note TEXT,
+        interaction_type TEXT DEFAULT 'General Note',
+        author_name TEXT,
+        author_role TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`, (err) => {
+        if (err) console.error('[CRM] Error creating crm_lead_activities table:', err.message);
+        else console.log('[CRM] crm_lead_activities table ready.');
+      });
+      db.run("ALTER TABLE crm_lead_activities ADD COLUMN interaction_type TEXT DEFAULT 'General Note'", () => {});
+      db.run('ALTER TABLE crm_lead_activities ADD COLUMN author_name TEXT', () => {});
+      db.run('ALTER TABLE crm_lead_activities ADD COLUMN author_role TEXT', () => {});
+
+      // Call logs table — stores WebRTC/browser call metadata & recording paths
+      db.run(`CREATE TABLE IF NOT EXISTS crm_call_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        lead_id INTEGER,
+        caller_id INTEGER,
+        caller_name TEXT,
+        direction TEXT DEFAULT 'outbound',
+        status TEXT DEFAULT 'completed',
+        duration_seconds INTEGER DEFAULT 0,
+        recording_url TEXT,
+        notes TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`, (err) => {
+        if (err) console.error('[CRM] Error creating crm_call_logs table:', err.message);
+        else console.log('[CRM] crm_call_logs table ready.');
+      });
+
+      // Google Sheets Direct Sync Config Table
+      db.run(`CREATE TABLE IF NOT EXISTS crm_google_sheets_config (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        is_active INTEGER DEFAULT 0,
+        auth_type TEXT DEFAULT 'direct_url',
+        google_account_email TEXT,
+        spreadsheet_id TEXT,
+        spreadsheet_name TEXT,
+        sheet_name TEXT,
+        api_key TEXT,
+        column_mapping TEXT,
+        sync_interval_minutes INTEGER DEFAULT 5,
+        last_synced_row INTEGER DEFAULT 1,
+        last_sync_at DATETIME,
+        last_sync_status TEXT DEFAULT 'idle',
+        last_sync_error TEXT,
+        total_synced_count INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`, (err) => {
+        if (err) console.error('[CRM] Error creating crm_google_sheets_config table:', err.message);
+        else console.log('[CRM] crm_google_sheets_config table ready.');
+      });
+
+      // Google Sheets Sync Audit Logs Table
+      db.run(`CREATE TABLE IF NOT EXISTS crm_google_sheets_sync_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sync_type TEXT DEFAULT 'manual',
+        synced_count INTEGER DEFAULT 0,
+        skipped_count INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'success',
+        error_message TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`, (err) => {
+        if (err) console.error('[CRM] Error creating crm_google_sheets_sync_logs table:', err.message);
+        else console.log('[CRM] crm_google_sheets_sync_logs table ready.');
+      });
+
+      // Ensure default administrator account exists once all schema & migrations complete
+      db.get('SELECT id FROM crm_users WHERE email = ?', ['admin@walktheplan.in'], (adminErr, adminRow) => {
+        if (!adminErr && !adminRow) {
+          const hash = bcrypt.hashSync('walk@321', 10);
+          db.run(
+            'INSERT INTO crm_users (name, email, role, password_hash, is_active, department, assigned_pipeline) VALUES (?, ?, ?, ?, 1, ?, ?)',
+            ['Admin', 'admin@walktheplan.in', 'admin', hash, 'Management', 'all'],
+            (insErr) => {
+              if (!insErr) {
+                console.log('[CRM] Seeded default administrator (admin@walktheplan.in / walk@321).');
               }
-            });
-          }
-        });
-      }
+              resolve();
+            }
+          );
+        } else {
+          resolve();
+        }
+      });
     });
-
-    // Ensure assigned_pipeline column in crm_users
-    db.run("ALTER TABLE crm_users ADD COLUMN assigned_pipeline TEXT DEFAULT 'pre_sales'", (err) => {
-      // Ignore duplicate column error
-    });
-
-    // Safe migration: add department column if it doesn't exist
-    const leadCols = [
-      'lead_category TEXT DEFAULT "meta"',
-      'meta_platform TEXT',
-      'floor_plan_status TEXT',
-      'plot_size TEXT',
-      'meta_ad_name TEXT',
-      'meta_campaign_name TEXT',
-      'studio_location TEXT',
-      'package_service TEXT',
-      'payment_status TEXT',
-      'token_paid REAL DEFAULT 0',
-      'balance_pending REAL DEFAULT 0',
-      'razorpay_id TEXT',
-      'inquiry_details TEXT',
-      'follow_up_time TEXT',
-      'follow_up_status TEXT DEFAULT "pending"',
-      'follow_up_notes TEXT',
-      'pipeline_stage TEXT DEFAULT "pre_sales"',
-      'presales_notes TEXT',
-      'presales_notes_by TEXT',
-      'presales_notes_at TEXT',
-      'mainsales_notes TEXT',
-      'mainsales_notes_by TEXT',
-      'mainsales_notes_at TEXT',
-      'postsales_notes TEXT',
-      'postsales_notes_by TEXT',
-      'postsales_notes_at TEXT'
-    ];
-    leadCols.forEach(col => {
-      db.run(`ALTER TABLE crm_leads ADD COLUMN ${col}`, () => {});
-    });
-    db.run(`UPDATE crm_leads SET pipeline_stage = 'pre_sales' WHERE pipeline_stage IS NULL OR pipeline_stage = ''`, () => {});
-    db.run(`ALTER TABLE crm_users ADD COLUMN avatar_color TEXT`, () => {});
-    db.run(`ALTER TABLE crm_users ADD COLUMN department TEXT`, () => {
-      // Ignore error — column may already exist
-    });
-
-    // Lead activity log with append-only interaction types
-    db.run(`CREATE TABLE IF NOT EXISTS crm_lead_activities (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      lead_id INTEGER,
-      user_id INTEGER,
-      action TEXT,
-      note TEXT,
-      interaction_type TEXT DEFAULT 'General Note',
-      author_name TEXT,
-      author_role TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`, (err) => {
-      if (err) console.error('[CRM] Error creating crm_lead_activities table:', err.message);
-      else {
-        console.log('[CRM] crm_lead_activities table ready.');
-        db.run("ALTER TABLE crm_lead_activities ADD COLUMN interaction_type TEXT DEFAULT 'General Note'", () => {});
-        db.run("ALTER TABLE crm_lead_activities ADD COLUMN author_name TEXT", () => {});
-        db.run("ALTER TABLE crm_lead_activities ADD COLUMN author_role TEXT", () => {});
-      }
-    });
-
-    // Call logs table — stores WebRTC/browser call metadata & recording paths
-    db.run(`CREATE TABLE IF NOT EXISTS crm_call_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      lead_id INTEGER,
-      caller_id INTEGER,
-      caller_name TEXT,
-      direction TEXT DEFAULT 'outbound',
-      status TEXT DEFAULT 'completed',
-      duration_seconds INTEGER DEFAULT 0,
-      recording_url TEXT,
-      notes TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`, (err) => {
-      if (err) console.error('[CRM] Error creating crm_call_logs table:', err.message);
-      else console.log('[CRM] crm_call_logs table ready.');
-    });
-
-    // Google Sheets Direct Sync Config Table
-    db.run(`CREATE TABLE IF NOT EXISTS crm_google_sheets_config (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      is_active INTEGER DEFAULT 0,
-      auth_type TEXT DEFAULT 'direct_url',
-      google_account_email TEXT,
-      spreadsheet_id TEXT,
-      spreadsheet_name TEXT,
-      sheet_name TEXT,
-      api_key TEXT,
-      column_mapping TEXT,
-      sync_interval_minutes INTEGER DEFAULT 5,
-      last_synced_row INTEGER DEFAULT 1,
-      last_sync_at DATETIME,
-      last_sync_status TEXT DEFAULT 'idle',
-      last_sync_error TEXT,
-      total_synced_count INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`, (err) => {
-      if (err) console.error('[CRM] Error creating crm_google_sheets_config table:', err.message);
-      else console.log('[CRM] crm_google_sheets_config table ready.');
-    });
-
-    // Google Sheets Sync Audit Logs Table
-    db.run(`CREATE TABLE IF NOT EXISTS crm_google_sheets_sync_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      sync_type TEXT DEFAULT 'manual',
-      synced_count INTEGER DEFAULT 0,
-      skipped_count INTEGER DEFAULT 0,
-      status TEXT DEFAULT 'success',
-      error_message TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`, (err) => {
-      if (err) console.error('[CRM] Error creating crm_google_sheets_sync_logs table:', err.message);
-      else console.log('[CRM] crm_google_sheets_sync_logs table ready.');
-    });
-
-    // SQLite concurrency hardening pragma
-    db.run("PRAGMA busy_timeout = 5000;", () => {});
+  });
 }
 
 function getTodayIST(offsetDays = 0) {
@@ -333,23 +344,30 @@ function randomAvatarColor() {
 
 // ─── DB helpers (promisified) ──────────────────────────────────────────────────
 let _db = null;
+let _dbReadyPromise = Promise.resolve();
 
-router.use((req, res, next) => {
-  if (!_db) {
-    const sqlite3 = require('sqlite3').verbose();
-    const dataDir = process.env.DATA_DIR || '';
-    const defaultDbPath = dataDir
-      ? path.join(dataDir, 'database.db')
-      : (fs.existsSync(path.join(__dirname, 'database.db'))
-        ? path.join(__dirname, 'database.db')
-        : (fs.existsSync(path.join(__dirname, '../../backend/database.db'))
-          ? path.join(__dirname, '../../backend/database.db')
-          : path.join(__dirname, 'database.db')));
-    const dbPath = process.env.DB_PATH || defaultDbPath;
-    _db = new sqlite3.Database(dbPath);
+router.use(async (req, res, next) => {
+  try {
+    if (!_db) {
+      const sqlite3 = require('sqlite3').verbose();
+      const dataDir = process.env.DATA_DIR || '';
+      const defaultDbPath = dataDir
+        ? path.join(dataDir, 'database.db')
+        : (fs.existsSync(path.join(__dirname, 'database.db'))
+          ? path.join(__dirname, 'database.db')
+          : (fs.existsSync(path.join(__dirname, '../../backend/database.db'))
+            ? path.join(__dirname, '../../backend/database.db')
+            : path.join(__dirname, 'database.db')));
+      const dbPath = process.env.DB_PATH || defaultDbPath;
+      _db = new sqlite3.Database(dbPath);
+      _dbReadyPromise = initCrmDb(_db);
+    }
+    await _dbReadyPromise;
+    req.crmDb = _db;
+    next();
+  } catch (err) {
+    next(err);
   }
-  req.crmDb = _db;
-  next();
 });
 
 function dbRun(db, sql, params = []) {
@@ -2944,9 +2962,10 @@ function runDailyBackupRoutine(db) {
 // ─── Init helper (sets module-level _db reference) ───────────────────────────
 function initCrmDbAndSetRef(db) {
   _db = db;
-  initCrmDb(db);
+  _dbReadyPromise = initCrmDb(db);
   runDailyBackupRoutine(db);
   runGoogleSheetsAutoSyncRoutine(db);
+  return _dbReadyPromise;
 }
 
 module.exports = { router, initCrmDb: initCrmDbAndSetRef };
