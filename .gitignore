@@ -1,0 +1,57 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Walk The Plan CRM — Standalone Git Ignore
+# Protects Database, Private Data, Audio Recordings, Client Leads & Secrets
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 1. Databases & SQLite Storage
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sql
+database.db
+**/database.db
+
+# 2. Environment Files & Secrets
+.env
+.env.*
+*.env
+*.env.*
+!.env.example
+!.env.template
+
+# 3. Uploads, Spreadsheets & Call Audio
+uploads/
+**/uploads/
+crm-audio/
+**/crm-audio/
+recordings/
+**/recordings/
+*.xls
+*.xlsx
+*.csv
+*.mp3
+*.wav
+*.webm
+*.ogg
+
+# 4. Dependencies
+node_modules/
+**/node_modules/
+
+# 5. Build Outputs
+dist/
+**/dist/
+build/
+**/build/
+*.zip
+
+# 6. Logs & OS
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+

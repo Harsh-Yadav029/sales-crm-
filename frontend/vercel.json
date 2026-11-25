@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "redirects": [
+    { "source": "/", "destination": "/crm/", "permanent": false },
+    { "source": "/login", "destination": "/crm/login", "permanent": false }
+  ],
+  "rewrites": [
+    { "source": "/crm/assets/(.*)", "destination": "/assets/$1" },
+    { "source": "/crm/favicon.svg", "destination": "/favicon.svg" },
+    { "source": "/crm", "destination": "/index.html" },
+    { "source": "/crm/", "destination": "/index.html" },
+    { "source": "/crm/(.*)", "destination": "/index.html" }
+  ]
+}

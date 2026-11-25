@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Environment files & secrets
+.env
+.env.*
+*.env
+*.env.*
+!.env.example
+!.env.template
+
+# SQLite databases & journals
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sql
+database.db
+
+# Uploaded audio, call recordings & spreadsheets
+uploads/
+crm-audio/
+crm-calls/
+*.xls
+*.xlsx
+*.csv
+*.mp3
+*.wav
+*.webm
+*.ogg
+
+# Backups & logs
+backups/
+*.log
+npm-debug.log*
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

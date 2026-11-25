@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: walktheplan-crm-backend
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: META_VERIFY_TOKEN
+        generateValue: true
+      # Optional: enforce x-webhook-secret on POST webhooks
+      # - key: WEBHOOK_SECRET
+      #   generateValue: true
+      # If using a Render Persistent Disk (paid Starter+ plan), uncomment both blocks below:
+      # - key: DATA_DIR
+      #   value: /var/data
+    # disk:
+    #   name: crm-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
