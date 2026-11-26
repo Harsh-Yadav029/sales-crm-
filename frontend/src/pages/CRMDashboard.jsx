@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import {
   Users, UserPlus, Upload, Mic, MicOff, Play, Square, Trash2, Edit, Phone, Mail,
@@ -518,7 +519,7 @@ const StageNotesPreview = ({ lead, onClick }) => {
 };
 
 // ─── Tab: Dashboard Overview ──────────────────────────────────────────────────
-const TabOverview = ({ addToast, onTabChange, currentUser, onSelectLead, lastUpdatedLead }) => {
+const TabOverview = ({ addToast, onTabChange, currentUser, onSelectLead, lastUpdatedLead, pipelineScope = '', isStageLocked = false }) => {
   const isSalesExec = ['sales', 'agent', 'field_agent', 'sales_engineer'].includes(currentUser?.role) || (currentUser?.department?.toLowerCase() === 'sales' && currentUser?.role !== 'admin' && currentUser?.role !== 'manager');
   const [stats, setStats] = useState(null);
   const [recent, setRecent] = useState([]);
@@ -542,14 +543,18 @@ const TabOverview = ({ addToast, onTabChange, currentUser, onSelectLead, lastUpd
   );
 
   const [activePipelineStage, setActivePipelineStage] = useState(
-    isAdminOrManager ? 'pre_sales' : userAssignedStage
+    pipelineScope || (isAdminOrManager ? 'pre_sales' : userAssignedStage)
   );
 
   useEffect(() => {
-    if (!isAdminOrManager && userAssignedStage) {
+    if (pipelineScope) {
+      setActivePipelineStage(pipelineScope);
+      setDrilldownCategory(null);
+      setDrilldownLeads([]);
+    } else if (!isAdminOrManager && userAssignedStage) {
       setActivePipelineStage(userAssignedStage);
     }
-  }, [isAdminOrManager, userAssignedStage]);
+  }, [pipelineScope, isAdminOrManager, userAssignedStage]);
 
   const applyPreset = (type) => {
     setDateRange(type);
@@ -587,6 +592,8 @@ const TabOverview = ({ addToast, onTabChange, currentUser, onSelectLead, lastUpd
       const params = new URLSearchParams();
       if (startDate) params.set('start_date', startDate);
       if (endDate) params.set('end_date', endDate);
+      if (pipelineScope) params.set('pipeline_stage', pipelineScope);
+      else if (isStageLocked && userAssignedStage) params.set('pipeline_stage', userAssignedStage);
       const query = params.toString() ? `?${params.toString()}` : '';
 
       const recentParams = new URLSearchParams(params);
@@ -605,7 +612,7 @@ const TabOverview = ({ addToast, onTabChange, currentUser, onSelectLead, lastUpd
     } finally {
       setLoading(false);
     }
-  }, [startDate, endDate, activePipelineStage, addToast]);
+  }, [startDate, endDate, activePipelineStage, pipelineScope, isStageLocked, userAssignedStage, addToast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -618,9 +625,11 @@ const TabOverview = ({ addToast, onTabChange, currentUser, onSelectLead, lastUpd
     const params = new URLSearchParams();
     if (startDate) params.set('start_date', startDate);
     if (endDate) params.set('end_date', endDate);
+    if (pipelineScope) params.set('pipeline_stage', pipelineScope);
+    else if (isStageLocked && userAssignedStage) params.set('pipeline_stage', userAssignedStage);
     const query = params.toString() ? `?${params.toString()}` : '';
     apiFetch(`/stats${query}`).then(s => { if (s) setStats(s); }).catch(() => {});
-  }, [lastUpdatedLead, startDate, endDate]);
+  }, [lastUpdatedLead, startDate, endDate, pipelineScope, isStageLocked, userAssignedStage]);
 
   const isViewOnlyStage = !isAdminOrManager && (userAssignedStage !== activePipelineStage);
   const canEditStage = !isViewOnlyStage;
@@ -948,13 +957,17 @@ const TabOverview = ({ addToast, onTabChange, currentUser, onSelectLead, lastUpd
         flexWrap: 'wrap',
         gap: 16
       }}>
-        {/* The 3 Stage Switcher Buttons */}
+        {/* The Stage Switcher Buttons (Master view shows all 3; Dedicated stage dashboard shows only active stage) */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           {[
             STAGE_CONFIG.pre_sales,
             STAGE_CONFIG.main_sales,
             STAGE_CONFIG.post_sales,
-          ].map(stage => {
+          ].filter(stage => {
+            if (!isStageLocked && !pipelineScope) return true;
+            const stageKey = stage.num === '01' ? 'pre_sales' : stage.num === '02' ? 'main_sales' : 'post_sales';
+            return stageKey === (pipelineScope || userAssignedStage);
+          }).map(stage => {
             const stageKey = stage.num === '01' ? 'pre_sales' : stage.num === '02' ? 'main_sales' : 'post_sales';
             const isStageActive = activePipelineStage === stageKey;
             const StageIcon = stage.icon;
@@ -1687,7 +1700,7 @@ const LeadFormModal = ({ open, onClose, lead, onSaved, addToast, isAdmin, isMana
 };
 
 // ─── Tab: Leads Management (Google Live Sheet Unified) ────────────────────────
-const TabLeads = ({ addToast, onAudio, onCallLead, onSelectLead, isAgent, isAdmin, isManager, isMarketingView = false, initialCategory = 'all', initialStatus = '', initialPipelineStage = '', currentUser = null, isMobile = false, lastUpdatedLead = null }) => {
+const TabLeads = ({ addToast, onAudio, onCallLead, onSelectLead, isAgent, isAdmin, isManager, isMarketingView = false, initialCategory = 'all', initialStatus = '', initialPipelineStage = '', lockedPipelineStage = '', currentUser = null, isMobile = false, lastUpdatedLead = null }) => {
   const [leads, setLeads] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -1696,7 +1709,7 @@ const TabLeads = ({ addToast, onAudio, onCallLead, onSelectLead, isAgent, isAdmi
   const [sheetConfig, setSheetConfig] = useState(null);
   const [search, setSearch] = useState('');
   const [statusF, setStatusF] = useState(initialStatus || '');
-  const [pipelineStageF, setPipelineStageF] = useState(initialPipelineStage || '');
+  const [pipelineStageF, setPipelineStageF] = useState(lockedPipelineStage || initialPipelineStage || '');
 
   useEffect(() => {
     setStatusF(initialStatus || '');
@@ -1704,9 +1717,9 @@ const TabLeads = ({ addToast, onAudio, onCallLead, onSelectLead, isAgent, isAdmi
   }, [initialStatus]);
 
   useEffect(() => {
-    setPipelineStageF(initialPipelineStage || '');
+    setPipelineStageF(lockedPipelineStage || initialPipelineStage || '');
     setPage(1);
-  }, [initialPipelineStage]);
+  }, [lockedPipelineStage, initialPipelineStage]);
   const [sourceF, setSourceF] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -1770,7 +1783,8 @@ const TabLeads = ({ addToast, onAudio, onCallLead, onSelectLead, isAgent, isAdmi
       const params = new URLSearchParams({ page, limit: LEADS_PER_PAGE });
       if (search) params.set('search', search);
       if (statusF) params.set('status', statusF);
-      if (pipelineStageF) params.set('pipeline_stage', pipelineStageF);
+      const effectivePipeFilter = lockedPipelineStage || pipelineStageF;
+      if (effectivePipeFilter) params.set('pipeline_stage', effectivePipeFilter);
       if (sourceF) params.set('source', sourceF);
       if (startDate) params.set('start_date', startDate);
       if (endDate) params.set('end_date', endDate);
@@ -1824,10 +1838,11 @@ const TabLeads = ({ addToast, onAudio, onCallLead, onSelectLead, isAgent, isAdmi
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
+    if (!isAdmin) return;
     apiFetch('/google-sheets/config')
       .then(res => { if (res?.config) setSheetConfig(res.config); })
       .catch(() => {});
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => {
     if (!lastUpdatedLead) return;
@@ -2049,8 +2064,8 @@ const TabLeads = ({ addToast, onAudio, onCallLead, onSelectLead, isAgent, isAdmi
           { id: 'pre_sales', label: '01 Pre-Sales', badge: '🎯', color: '#38bdf8' },
           { id: 'main_sales', label: '02 Main Sales', badge: '⚡', color: '#f59e0b' },
           { id: 'post_sales', label: '03 Post-Sales', badge: '🚀', color: '#10b981' },
-        ].map(s => {
-          const active = pipelineStageF === s.id;
+        ].filter(s => !lockedPipelineStage || s.id === lockedPipelineStage).map(s => {
+          const active = (lockedPipelineStage || pipelineStageF) === s.id;
           return (
             <button
               key={s.id}
@@ -3443,7 +3458,7 @@ const TabCallStudio = ({ initialLead, addToast, isAdmin, isAgent }) => {
 };
 
 // ─── Tab: Audio Notes ─────────────────────────────────────────────────────────
-const TabAudio = ({ selectedLead, setSelectedLead, addToast, isAdmin, isAgent }) => {
+const TabAudio = ({ selectedLead, setSelectedLead, addToast, isAdmin, isAgent, pipelineStage = '' }) => {
   const [recordings, setRecordings] = useState([]);
   const [selectedAudioIds, setSelectedAudioIds] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -3467,10 +3482,11 @@ const TabAudio = ({ selectedLead, setSelectedLead, addToast, isAdmin, isAgent })
   const canDelete = isAdmin;
 
   useEffect(() => {
-    apiFetch('/leads?limit=150').then(d => {
+    const q = pipelineStage ? `&pipeline_stage=${encodeURIComponent(pipelineStage)}` : '';
+    apiFetch(`/leads?limit=150${q}`).then(d => {
       if (d?.leads) setLeadOptions(d.leads);
     }).catch(() => { });
-  }, []);
+  }, [pipelineStage]);
 
   const loadRecordings = useCallback(async () => {
     setLoading(true);
@@ -3480,11 +3496,12 @@ const TabAudio = ({ selectedLead, setSelectedLead, addToast, isAdmin, isAgent })
         const data = await apiFetch(`/leads/${id}/audio`);
         setRecordings(data.recordings || data || []);
       } else {
-        const data = await apiFetch('/audio');
+        const q = pipelineStage ? `?pipeline_stage=${encodeURIComponent(pipelineStage)}` : '';
+        const data = await apiFetch(`/audio${q}`);
         setRecordings(Array.isArray(data) ? data : []);
       }
     } catch { setRecordings([]); } finally { setLoading(false); }
-  }, [selectedLead]);
+  }, [selectedLead, pipelineStage]);
 
   useEffect(() => { loadRecordings(); }, [loadRecordings]);
 
@@ -4647,7 +4664,8 @@ const TabUsers = ({ addToast, currentUser, activeSubTab = 'directory', onSubTabC
 };
 
 // ─── Main CRM Dashboard Component ────────────────────────────────────────────
-export default function CRMDashboard() {
+export default function CRMDashboard({ forcedPipeline = '' }) {
+  const navigate = useNavigate();
   const [tab, setTab] = useState('overview'); // Default to Industrial Dashboard overview
   const [activeDept, setActiveDept] = useState('sales');
   const [selectedLead, setSelectedLead] = useState(null);
@@ -4665,10 +4683,10 @@ export default function CRMDashboard() {
   }, []);
 
   useEffect(() => {
-    if (tab === 'overview') setActiveDept('sales');
-    else if (tab === 'leads') setActiveDept('marketing');
-    else if (tab === 'team') setActiveDept('team');
-  }, [tab]);
+    if (tab === 'team') setActiveDept('team');
+    else if (tab === 'leads' && !forcedPipeline) setActiveDept('marketing');
+    else setActiveDept(forcedPipeline || 'sales');
+  }, [tab, forcedPipeline]);
 
   // Authenticated user from local storage + live sync via /auth/me
   const [currentUser, setCurrentUser] = useState(() => {
@@ -4693,12 +4711,33 @@ export default function CRMDashboard() {
   }, []);
 
   const userRoleLower = (currentUser.role || '').toLowerCase();
+  const userDeptLower = (currentUser.department || '').toLowerCase();
   const userPipeLower = (currentUser.assigned_pipeline || '').toLowerCase();
   const isAdmin = userRoleLower === 'admin';
   const isManager = userRoleLower === 'manager' || userPipeLower === 'all';
-  const isSalesExec = !isAdmin && !isManager && (['sales', 'agent', 'field_agent', 'sales_engineer', 'pre_sales', 'main_sales', 'post_sales'].includes(userRoleLower) || (currentUser.department || '').toLowerCase().includes('sales'));
-  const isMarketing = !isAdmin && !isManager && (userRoleLower === 'marketing' || (currentUser.department || '').toLowerCase() === 'marketing');
+  const isSalesExec = !isAdmin && !isManager && (['sales', 'agent', 'field_agent', 'sales_engineer', 'pre_sales', 'main_sales', 'post_sales'].includes(userRoleLower) || userDeptLower.includes('sales'));
+  const isMarketing = !isAdmin && !isManager && (userRoleLower === 'marketing' || userDeptLower === 'marketing');
   const isAgent = isSalesExec;
+
+  const userAssignedStage = (userPipeLower && userPipeLower !== 'all') ? userPipeLower : (
+    (userDeptLower.includes('post') || userRoleLower.includes('post')) ? 'post_sales' :
+    (userDeptLower.includes('main') || userRoleLower.includes('main') || userRoleLower === 'sales' || userRoleLower === 'agent') ? 'main_sales' :
+    'pre_sales'
+  );
+  const isStageLocked = Boolean(currentUser?.role && !isAdmin && !isManager && !isMarketing);
+  const effectivePipelineScope = isStageLocked ? userAssignedStage : (forcedPipeline || '');
+
+  useEffect(() => {
+    if (isStageLocked && userAssignedStage) {
+      const targetPath =
+        userAssignedStage === 'main_sales' ? '/crm/main-sales' :
+        userAssignedStage === 'post_sales' ? '/crm/post-sales' :
+        '/crm/pre-sales';
+      if (forcedPipeline !== userAssignedStage) {
+        navigate(targetPath, { replace: true });
+      }
+    }
+  }, [isStageLocked, userAssignedStage, forcedPipeline, navigate]);
 
   const [leadFilterStatus, setLeadFilterStatus] = useState('');
   const [leadFilterPipelineStage, setLeadFilterPipelineStage] = useState('');
@@ -4711,7 +4750,7 @@ export default function CRMDashboard() {
     { id: 'followups', label: 'Follow-Up Center', icon: Clock },
     { id: 'calendar', label: 'Calendar', icon: Calendar },
     { id: 'calls', label: 'Call Studio', icon: PhoneCall },
-    { id: 'integration', label: 'Data Ingest', icon: Upload },
+    ...(isAdmin ? [{ id: 'integration', label: 'Data Ingest', icon: Upload }] : []),
     ...(isAdmin ? [{ id: 'backups', label: 'Backups', icon: Database }] : []),
     ...(isAdmin ? [{ id: 'team', label: 'Team & RBAC', icon: Shield }] : []),
   ];
@@ -4902,7 +4941,7 @@ export default function CRMDashboard() {
           </div>
         </header>
 
-        {/* Executive Switcher Subheader Bar (Exact Match to Industrial B2B Portal) */}
+        {/* Executive Switcher Subheader Bar */}
         <div style={{
           display: 'flex', alignItems: 'center', gap: 8, padding: '7px 24px',
           background: '#09090b',
@@ -4911,24 +4950,41 @@ export default function CRMDashboard() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginRight: 6, flexShrink: 0 }}>
             <SlidersHorizontal size={13} color={P.gold} />
             <span style={{ fontSize: 11, fontWeight: 800, color: P.gold, letterSpacing: 0.6, textTransform: 'uppercase', whiteSpace: 'nowrap' }}>
-              EXECUTIVE SWITCHER:
+              {isStageLocked ? 'WORKSPACE:' : 'EXECUTIVE SWITCHER:'}
             </span>
           </div>
 
-          {[
-            { id: 'sales', label: '01) Sales', badge: 'FULL CRM', icon: TrendingUp, color: P.gold, targetTab: 'overview' },
-            { id: 'marketing', label: '02) Marketing', badge: 'VIEW-ONLY', icon: Eye, color: '#a855f7', targetTab: 'leads' },
-            ...(isAdmin ? [{ id: 'team', label: '03) Team & RBAC', badge: 'ADMIN', icon: Shield, color: P.gold, targetTab: 'team' }] : []),
-          ].map(dept => {
-            const isDeptActive = activeDept === dept.id;
+          {(isStageLocked ? [
+            userAssignedStage === 'post_sales'
+              ? { id: 'post_sales', label: '03) Post-Sales Dashboard', badge: 'DEDICATED', icon: Award, color: '#10b981', route: '/crm/post-sales' }
+              : userAssignedStage === 'main_sales'
+                ? { id: 'main_sales', label: '02) Main Sales Dashboard', badge: 'DEDICATED', icon: PhoneCall, color: '#f59e0b', route: '/crm/main-sales' }
+                : { id: 'pre_sales', label: '01) Pre-Sales Dashboard', badge: 'DEDICATED', icon: Zap, color: '#38bdf8', route: '/crm/pre-sales' }
+          ] : isMarketing ? [
+            { id: 'marketing', label: 'Marketing Overview', badge: 'VIEW-ONLY', icon: Eye, color: '#a855f7', targetTab: 'leads', route: '/crm' }
+          ] : [
+            { id: 'sales', label: 'All Pipelines', badge: 'MASTER', icon: TrendingUp, color: P.gold, route: '/crm' },
+            { id: 'pre_sales', label: '01) Pre-Sales', badge: 'STAGE 1', icon: Zap, color: '#38bdf8', route: '/crm/pre-sales' },
+            { id: 'main_sales', label: '02) Main Sales', badge: 'STAGE 2', icon: PhoneCall, color: '#f59e0b', route: '/crm/main-sales' },
+            { id: 'post_sales', label: '03) Post-Sales', badge: 'STAGE 3', icon: Award, color: '#10b981', route: '/crm/post-sales' },
+            { id: 'marketing', label: 'Marketing', badge: 'VIEW-ONLY', icon: Eye, color: '#a855f7', targetTab: 'leads', route: '/crm' },
+            ...(isAdmin ? [{ id: 'team', label: 'Team & RBAC', badge: 'ADMIN', icon: Shield, color: P.gold, targetTab: 'team' }] : []),
+          ]).map(dept => {
+            const isDeptActive = isStageLocked ? true : activeDept === dept.id;
             const Icon = dept.icon;
 
             return (
               <button
                 key={dept.id}
                 onClick={() => {
+                  if (dept.route) {
+                    navigate(dept.route);
+                    if (dept.targetTab) setTab(dept.targetTab);
+                    else if (tab === 'team') setTab('overview');
+                  } else if (dept.targetTab) {
+                    setTab(dept.targetTab);
+                  }
                   setActiveDept(dept.id);
-                  if (dept.targetTab) setTab(dept.targetTab);
                 }}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 6,
@@ -4970,7 +5026,8 @@ export default function CRMDashboard() {
             isMarketingView={isMarketing}
             initialCategory="all"
             initialStatus={leadFilterStatus}
-            initialPipelineStage={leadFilterPipelineStage}
+            initialPipelineStage={effectivePipelineScope || leadFilterPipelineStage}
+            lockedPipelineStage={effectivePipelineScope}
             currentUser={currentUser}
             isMobile={isMobile}
             lastUpdatedLead={lastUpdatedLead}
@@ -4983,12 +5040,14 @@ export default function CRMDashboard() {
               setTab(target);
               if (target === 'leads') {
                 setLeadFilterStatus(stage || '');
-                setLeadFilterPipelineStage(pipelineStage || '');
+                setLeadFilterPipelineStage(effectivePipelineScope || pipelineStage || '');
               }
             }}
             currentUser={currentUser}
             onSelectLead={(l) => setSelectedLead(l)}
             lastUpdatedLead={lastUpdatedLead}
+            pipelineScope={effectivePipelineScope}
+            isStageLocked={isStageLocked}
           />
         )}
         {tab === 'followups' && (
@@ -5001,6 +5060,7 @@ export default function CRMDashboard() {
             isManager={isManager}
             isSalesExec={isSalesExec}
             isMobile={isMobile}
+            pipelineStage={effectivePipelineScope}
           />
         )}
         {tab === 'calendar' && (
@@ -5013,6 +5073,7 @@ export default function CRMDashboard() {
             isManager={isManager}
             isSalesExec={isSalesExec}
             isMobile={isMobile}
+            pipelineStage={effectivePipelineScope}
           />
         )}
         {tab === 'calls' && (
@@ -5023,7 +5084,7 @@ export default function CRMDashboard() {
             isAgent={isSalesExec}
           />
         )}
-        {tab === 'integration' && (
+        {tab === 'integration' && isAdmin && (
           <GoogleSheetsIntegrationPanel addToast={addToast} />
         )}
         {tab === 'audio' && (
@@ -5033,6 +5094,7 @@ export default function CRMDashboard() {
             addToast={addToast}
             isAdmin={isAdmin}
             isAgent={isSalesExec}
+            pipelineStage={effectivePipelineScope}
           />
         )}
         {tab === 'backups' && isAdmin && (

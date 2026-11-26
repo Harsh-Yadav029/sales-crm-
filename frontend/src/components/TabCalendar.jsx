@@ -13,7 +13,8 @@ export default function TabCalendar({
   isAdmin,
   isManager,
   isSalesExec,
-  isMobile
+  isMobile,
+  pipelineStage = ''
 }) {
   const [viewMode, setViewMode] = useState(isMobile ? 'agenda' : 'month'); // 'month' | 'week' | 'agenda'
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -57,6 +58,9 @@ export default function TabCalendar({
       if (selectedAgent && (isAdmin || isManager)) {
         params.set('assigned_to', selectedAgent);
       }
+      if (pipelineStage) {
+        params.set('pipeline_stage', pipelineStage);
+      }
 
       const res = await apiFetch(`/calendar?${params.toString()}`);
       setEvents(res?.events || []);
@@ -65,7 +69,7 @@ export default function TabCalendar({
     } finally {
       setLoading(false);
     }
-  }, [year, month, selectedAgent, isAdmin, isManager, addToast]);
+  }, [year, month, selectedAgent, isAdmin, isManager, pipelineStage, addToast]);
 
   useEffect(() => {
     loadCalendarEvents();

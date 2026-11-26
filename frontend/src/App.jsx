@@ -28,6 +28,30 @@ export default function App() {
               </ProtectedCRMRoute>
             }
           />
+          <Route
+            path="/crm/pre-sales"
+            element={
+              <ProtectedCRMRoute>
+                <CRMDashboard forcedPipeline="pre_sales" />
+              </ProtectedCRMRoute>
+            }
+          />
+          <Route
+            path="/crm/main-sales"
+            element={
+              <ProtectedCRMRoute>
+                <CRMDashboard forcedPipeline="main_sales" />
+              </ProtectedCRMRoute>
+            }
+          />
+          <Route
+            path="/crm/post-sales"
+            element={
+              <ProtectedCRMRoute>
+                <CRMDashboard forcedPipeline="post_sales" />
+              </ProtectedCRMRoute>
+            }
+          />
           <Route path="/" element={<Navigate to="/crm" replace />} />
           <Route path="*" element={<Navigate to="/crm" replace />} />
         </Routes>

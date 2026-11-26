@@ -9,6 +9,24 @@ const P = {
   red: '#ef4444', green: '#22c55e',
 };
 
+const resolveHomeRoute = (user) => {
+  if (!user) return '/crm';
+  const r = (user.role || '').toLowerCase();
+  const d = (user.department || '').toLowerCase();
+  const p = (user.assigned_pipeline || '').toLowerCase();
+  if (r === 'admin' || r === 'manager' || p === 'all' || r === 'marketing' || d === 'marketing') return '/crm';
+  const stage = (p === 'pre_sales' || p === 'main_sales' || p === 'post_sales')
+    ? p
+    : (d.includes('post') || r.includes('post'))
+      ? 'post_sales'
+      : (d.includes('main') || r.includes('main') || r === 'sales' || r === 'agent')
+        ? 'main_sales'
+        : 'pre_sales';
+  if (stage === 'main_sales') return '/crm/main-sales';
+  if (stage === 'post_sales') return '/crm/post-sales';
+  return '/crm/pre-sales';
+};
+
 export default function CRMLoginPage() {
   const navigate = useNavigate();
   const [form, setForm] = useState({ email: '', password: '' });
@@ -19,7 +37,11 @@ export default function CRMLoginPage() {
   // If already logged in, redirect
   useEffect(() => {
     const token = localStorage.getItem('crm_token');
-    if (token) navigate('/crm', { replace: true });
+    if (token) {
+      let cachedUser = null;
+      try { cachedUser = JSON.parse(localStorage.getItem('crm_user') || 'null'); } catch {}
+      navigate(resolveHomeRoute(cachedUser), { replace: true });
+    }
   }, [navigate]);
 
   const submit = async (e) => {
@@ -52,7 +74,7 @@ export default function CRMLoginPage() {
       if (!res.ok) throw new Error(data.message || 'Login failed');
       localStorage.setItem('crm_token', data.token);
       localStorage.setItem('crm_user', JSON.stringify(data.user));
-      navigate('/crm', { replace: true });
+      navigate(resolveHomeRoute(data.user), { replace: true });
     } catch (err) {
       setError(err.message === 'Failed to fetch' ? 'Cannot reach CRM backend server. Ensure the backend is running.' : (err.message || 'Invalid credentials. Please try again.'));
     } finally {

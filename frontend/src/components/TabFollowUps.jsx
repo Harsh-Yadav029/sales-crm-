@@ -14,7 +14,8 @@ export default function TabFollowUps({
   isAdmin,
   isManager,
   isSalesExec,
-  isMobile
+  isMobile,
+  pipelineStage = ''
 }) {
   const fuRole = (currentUser?.role || '').toLowerCase();
   const fuDept = (currentUser?.department || '').toLowerCase();
@@ -60,6 +61,9 @@ export default function TabFollowUps({
       if (selectedAgent && (isAdmin || isManager)) {
         params.set('assigned_to', selectedAgent);
       }
+      if (pipelineStage) {
+        params.set('pipeline_stage', pipelineStage);
+      }
       const res = await apiFetch(`/followups?${params.toString()}`);
       setData(res || { today: [], overdue: [], upcoming: [], completed: [], counts: {} });
     } catch (err) {
@@ -67,7 +71,7 @@ export default function TabFollowUps({
     } finally {
       setLoading(false);
     }
-  }, [selectedAgent, isAdmin, isManager, addToast]);
+  }, [selectedAgent, isAdmin, isManager, pipelineStage, addToast]);
 
   useEffect(() => {
     loadFollowUps();

@@ -332,6 +332,16 @@ const getUserPipelineRole = (u) => {
   return 'pre_sales';
 };
 
+// Restrict single-stage reps to their own pipeline; allow admin/manager/marketing to view all or any selected stage
+const resolveEffectivePipelineFilter = (user, requestedStage) => {
+  if (isAdminOrManager(user) || isMarketing(user)) {
+    const reqStage = String(requestedStage || '').trim().toLowerCase();
+    return (reqStage === 'pre_sales' || reqStage === 'main_sales' || reqStage === 'post_sales') ? reqStage : '';
+  }
+  const userPipe = getUserPipelineRole(user);
+  return (userPipe === 'pre_sales' || userPipe === 'main_sales' || userPipe === 'post_sales') ? userPipe : 'pre_sales';
+};
+
 
 // ─── Avatar Colors ────────────────────────────────────────────────────────────
 const AVATAR_COLORS = [
@@ -679,7 +689,7 @@ router.get('/api/crm/leads', crmAuth, async (req, res) => {
     const assigned_to = req.query.assigned_to || '';
     const priority = req.query.priority || '';
     const source = req.query.source || '';
-    const pipeline_stage = req.query.pipeline_stage || '';
+    const pipeline_stage = resolveEffectivePipelineFilter(req.user, req.query.pipeline_stage);
     const lead_category = req.query.lead_category || '';
     const start_date = req.query.start_date || '';
     const end_date = req.query.end_date || '';
@@ -688,7 +698,7 @@ router.get('/api/crm/leads', crmAuth, async (req, res) => {
     const params = [];
 
     // Pipeline Stage filter (pre_sales vs main_sales vs post_sales)
-    if (pipeline_stage && pipeline_stage !== 'all') {
+    if (pipeline_stage) {
       if (pipeline_stage === 'pre_sales') {
         conditions.push('(pipeline_stage = "pre_sales" OR pipeline_stage IS NULL OR pipeline_stage = "")');
       } else {
@@ -839,6 +849,13 @@ router.get('/api/crm/leads/:id', (req, res, next) => {
   try {
     const lead = await dbGet(db, 'SELECT * FROM crm_leads WHERE id = ?', [req.params.id]);
     if (!lead) return res.status(404).json({ message: 'Lead not found.' });
+    if (!isAdminOrManager(req.user) && !isMarketing(req.user)) {
+      const userPipe = getUserPipelineRole(req.user);
+      const leadStage = lead.pipeline_stage || 'pre_sales';
+      if (userPipe !== 'all' && userPipe !== leadStage) {
+        return res.status(403).json({ message: 'Access denied: Lead belongs to a different pipeline stage.' });
+      }
+    }
     res.json({ lead, ...lead });
   } catch (err) {
     console.error('[CRM] GET /api/crm/leads/:id error:', err.message);
@@ -1570,12 +1587,10 @@ router.get('/api/crm/audio', crmAuth, async (req, res) => {
     }
     const conditions = ['audio_url IS NOT NULL', 'audio_url != ""'];
     const params = [];
-    if (!isAdminOrManager(req.user)) {
-      const userPipe = getUserPipelineRole(req.user);
-      if (userPipe && userPipe !== 'all') {
-        conditions.push("COALESCE(NULLIF(pipeline_stage, ''), 'pre_sales') = ?");
-        params.push(userPipe);
-      }
+    const effectiveStage = resolveEffectivePipelineFilter(req.user, req.query.pipeline_stage);
+    if (effectiveStage) {
+      conditions.push("COALESCE(NULLIF(pipeline_stage, ''), 'pre_sales') = ?");
+      params.push(effectiveStage);
     }
     const where = 'WHERE ' + conditions.join(' AND ');
     const rows = await dbAll(
@@ -2015,9 +2030,19 @@ router.get('/api/crm/stats', crmAuth, async (req, res) => {
   try {
     const { start_date, end_date } = req.query;
     let lead_category = req.query.lead_category || '';
+    const effectiveStage = resolveEffectivePipelineFilter(req.user, req.query.pipeline_stage);
 
     const conditions = [];
     const params = [];
+
+    if (effectiveStage) {
+      if (effectiveStage === 'pre_sales') {
+        conditions.push('(pipeline_stage = "pre_sales" OR pipeline_stage IS NULL OR pipeline_stage = "")');
+      } else {
+        conditions.push('pipeline_stage = ?');
+        params.push(effectiveStage);
+      }
+    }
 
     if (lead_category && lead_category !== 'all') {
       if (lead_category === 'google_sheets' || lead_category === 'sheets' || lead_category === 'website') {
@@ -2149,8 +2174,18 @@ router.get('/api/crm/calendar', crmAuth, async (req, res) => {
   const db = req.crmDb;
   try {
     const { start_date, end_date, assigned_to } = req.query;
+    const effectiveStage = resolveEffectivePipelineFilter(req.user, req.query.pipeline_stage);
     const conditions = ['follow_up_date IS NOT NULL', 'follow_up_date != ""'];
     const params = [];
+
+    if (effectiveStage) {
+      if (effectiveStage === 'pre_sales') {
+        conditions.push('(pipeline_stage = "pre_sales" OR pipeline_stage IS NULL OR pipeline_stage = "")');
+      } else {
+        conditions.push('pipeline_stage = ?');
+        params.push(effectiveStage);
+      }
+    }
 
     if (assigned_to) {
       conditions.push('assigned_to = ?');
@@ -2206,8 +2241,18 @@ router.get('/api/crm/followups', crmAuth, async (req, res) => {
   const db = req.crmDb;
   try {
     const { assigned_to } = req.query;
+    const effectiveStage = resolveEffectivePipelineFilter(req.user, req.query.pipeline_stage);
     const conditions = ['follow_up_date IS NOT NULL', 'follow_up_date != ""'];
     const params = [];
+
+    if (effectiveStage) {
+      if (effectiveStage === 'pre_sales') {
+        conditions.push('(pipeline_stage = "pre_sales" OR pipeline_stage IS NULL OR pipeline_stage = "")');
+      } else {
+        conditions.push('pipeline_stage = ?');
+        params.push(effectiveStage);
+      }
+    }
 
     if (assigned_to) {
       conditions.push('assigned_to = ?');
@@ -2772,7 +2817,7 @@ router.get('/api/crm/backup/download-snapshot/:filename', crmAuth, requireRole('
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // GET /api/crm/google-sheets/config — Get active integration config & recent stats
-router.get('/api/crm/google-sheets/config', crmAuth, async (req, res) => {
+router.get('/api/crm/google-sheets/config', crmAuth, requireRole('admin'), async (req, res) => {
   const db = req.crmDb;
   try {
     const config = await dbGet(db, 'SELECT * FROM crm_google_sheets_config ORDER BY id DESC LIMIT 1');
@@ -2788,7 +2833,7 @@ router.get('/api/crm/google-sheets/config', crmAuth, async (req, res) => {
 });
 
 // POST /api/crm/google-sheets/connect — Connect Google Sheet, test read, auto-map headers
-router.post('/api/crm/google-sheets/connect', crmAuth, requireRole('admin', 'manager'), async (req, res) => {
+router.post('/api/crm/google-sheets/connect', crmAuth, requireRole('admin'), async (req, res) => {
   const db = req.crmDb;
   try {
     const { spreadsheet_url, sheet_name, api_key } = req.body;
@@ -2852,7 +2897,7 @@ router.post('/api/crm/google-sheets/connect', crmAuth, requireRole('admin', 'man
 });
 
 // POST /api/crm/google-sheets/inspect-headers — Re-inspect headers for custom tab
-router.post('/api/crm/google-sheets/inspect-headers', crmAuth, async (req, res) => {
+router.post('/api/crm/google-sheets/inspect-headers', crmAuth, requireRole('admin'), async (req, res) => {
   const db = req.crmDb;
   try {
     const { spreadsheet_id, sheet_name, api_key } = req.body;
@@ -2883,7 +2928,7 @@ router.post('/api/crm/google-sheets/inspect-headers', crmAuth, async (req, res) 
 });
 
 // POST /api/crm/google-sheets/save-mapping — Save custom column mappings
-router.post('/api/crm/google-sheets/save-mapping', crmAuth, requireRole('admin', 'manager'), async (req, res) => {
+router.post('/api/crm/google-sheets/save-mapping', crmAuth, requireRole('admin'), async (req, res) => {
   const db = req.crmDb;
   try {
     const { mapping, sheet_name, is_active } = req.body;
@@ -2911,7 +2956,7 @@ router.post('/api/crm/google-sheets/save-mapping', crmAuth, requireRole('admin',
 });
 
 // POST /api/crm/google-sheets/sync-now — Manually trigger synchronization
-router.post('/api/crm/google-sheets/sync-now', crmAuth, async (req, res) => {
+router.post('/api/crm/google-sheets/sync-now', crmAuth, requireRole('admin'), async (req, res) => {
   const db = req.crmDb;
   try {
     const config = await dbGet(db, 'SELECT * FROM crm_google_sheets_config ORDER BY id DESC LIMIT 1');
@@ -2927,7 +2972,7 @@ router.post('/api/crm/google-sheets/sync-now', crmAuth, async (req, res) => {
 });
 
 // POST /api/crm/google-sheets/disconnect — Disconnect Google Sheet
-router.post('/api/crm/google-sheets/disconnect', crmAuth, requireRole('admin', 'manager'), async (req, res) => {
+router.post('/api/crm/google-sheets/disconnect', crmAuth, requireRole('admin'), async (req, res) => {
   const db = req.crmDb;
   try {
     await dbRun(db, 'UPDATE crm_google_sheets_config SET is_active = 0, last_sync_status = "disconnected"');
@@ -2938,7 +2983,7 @@ router.post('/api/crm/google-sheets/disconnect', crmAuth, requireRole('admin', '
 });
 
 // GET /api/crm/google-sheets/logs — Audit logs
-router.get('/api/crm/google-sheets/logs', crmAuth, async (req, res) => {
+router.get('/api/crm/google-sheets/logs', crmAuth, requireRole('admin'), async (req, res) => {
   const db = req.crmDb;
   try {
     const logs = await dbAll(db, 'SELECT * FROM crm_google_sheets_sync_logs ORDER BY id DESC LIMIT 50');
