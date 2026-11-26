@@ -4684,7 +4684,6 @@ export default function CRMDashboard({ forcedPipeline = '' }) {
 
   useEffect(() => {
     if (tab === 'team') setActiveDept('team');
-    else if (tab === 'leads' && !forcedPipeline) setActiveDept('marketing');
     else setActiveDept(forcedPipeline || 'sales');
   }, [tab, forcedPipeline]);
 
@@ -4967,7 +4966,6 @@ export default function CRMDashboard({ forcedPipeline = '' }) {
             { id: 'pre_sales', label: '01) Pre-Sales', badge: 'STAGE 1', icon: Zap, color: '#38bdf8', route: '/crm/pre-sales' },
             { id: 'main_sales', label: '02) Main Sales', badge: 'STAGE 2', icon: PhoneCall, color: '#f59e0b', route: '/crm/main-sales' },
             { id: 'post_sales', label: '03) Post-Sales', badge: 'STAGE 3', icon: Award, color: '#10b981', route: '/crm/post-sales' },
-            { id: 'marketing', label: 'Marketing', badge: 'VIEW-ONLY', icon: Eye, color: '#a855f7', targetTab: 'leads', route: '/crm' },
             ...(isAdmin ? [{ id: 'team', label: 'Team & RBAC', badge: 'ADMIN', icon: Shield, color: P.gold, targetTab: 'team' }] : []),
           ]).map(dept => {
             const isDeptActive = isStageLocked ? true : activeDept === dept.id;
